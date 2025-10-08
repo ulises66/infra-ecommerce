@@ -6,7 +6,6 @@ from aws_cdk import (
     RemovalPolicy,
     Stack,
     aws_ec2 as ec2,
-    aws_ecr as ecr,
     aws_ecs as ecs,
     aws_elasticloadbalancingv2 as elbv2,
     aws_rds as rds,
@@ -40,23 +39,6 @@ class InfraEcommerceStack(Stack):
         )
 
         cluster = ecs.Cluster(self, "EcommerceCluster", vpc=vpc)
-
-        # Container image repositories (ECR)
-        frontend_repository = ecr.Repository(
-            self,
-            "FrontendRepository",
-            repository_name="ecommerce-frontend",
-            removal_policy=RemovalPolicy.DESTROY,
-            auto_delete_images=True,
-        )
-
-        backend_repository = ecr.Repository(
-            self,
-            "BackendRepository",
-            repository_name="ecommerce-backend",
-            removal_policy=RemovalPolicy.DESTROY,
-            auto_delete_images=True,
-        )
 
         # Secrets for database credentials
         database_secret = secretsmanager.Secret(
@@ -173,9 +155,7 @@ class InfraEcommerceStack(Stack):
         )
         frontend_container = frontend_task.add_container(
             "FrontendContainer",
-            image=ecs.ContainerImage.from_ecr_repository(
-                frontend_repository, tag="latest"
-            ),
+            image=ecs.ContainerImage.from_asset("container_images/frontend"),
             logging=ecs.LogDrivers.aws_logs(stream_prefix="Frontend"),
         )
         frontend_container.add_port_mappings(
@@ -193,9 +173,7 @@ class InfraEcommerceStack(Stack):
         )
         backend_container = backend_task.add_container(
             "BackendContainer",
-            image=ecs.ContainerImage.from_ecr_repository(
-                backend_repository, tag="latest"
-            ),
+            image=ecs.ContainerImage.from_asset("container_images/backend"),
             logging=ecs.LogDrivers.aws_logs(stream_prefix="Backend"),
             environment={
                 "DB_HOST": database.instance_endpoint.hostname,
@@ -297,16 +275,16 @@ class InfraEcommerceStack(Stack):
 
         CfnOutput(
             self,
-            "FrontendRepositoryUri",
-            value=frontend_repository.repository_uri,
-            description="ECR repository URI for the Next.js frontend image",
+            "FrontendDockerContext",
+            value="container_images/frontend",
+            description="Path to the Docker context used to build the frontend container",
         )
 
         CfnOutput(
             self,
-            "BackendRepositoryUri",
-            value=backend_repository.repository_uri,
-            description="ECR repository URI for the Node.js backend image",
+            "BackendDockerContext",
+            value="container_images/backend",
+            description="Path to the Docker context used to build the backend container",
         )
 
         CfnOutput(
