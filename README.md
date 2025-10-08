@@ -26,6 +26,11 @@ with your Dockerfile and supporting files, then deploy again. The `Frontend` and
 `Backend` outputs in the CloudFormation stack list the relative paths so that
 other team members can easily locate the build contexts.
 
+> **Note:** The CDK stack builds both images for the `linux/amd64` platform so
+> that they run on the default AWS Fargate architecture. If you need to target
+> a different runtime (for example Graviton/ARM), adjust the `Platform`
+> parameter in `infra_ecommerce_stack.py` accordingly.
+
 ## Getting started
 
 1. Create and activate a virtual environment (optional but recommended):

@@ -11,6 +11,7 @@ from aws_cdk import (
     aws_rds as rds,
     aws_secretsmanager as secretsmanager,
 )
+from aws_cdk.aws_ecr_assets import Platform
 from constructs import Construct
 
 
@@ -155,7 +156,9 @@ class InfraEcommerceStack(Stack):
         )
         frontend_container = frontend_task.add_container(
             "FrontendContainer",
-            image=ecs.ContainerImage.from_asset("container_images/frontend"),
+            image=ecs.ContainerImage.from_asset(
+                "container_images/frontend", platform=Platform.LINUX_AMD64
+            ),
             logging=ecs.LogDrivers.aws_logs(stream_prefix="Frontend"),
         )
         frontend_container.add_port_mappings(
@@ -173,7 +176,9 @@ class InfraEcommerceStack(Stack):
         )
         backend_container = backend_task.add_container(
             "BackendContainer",
-            image=ecs.ContainerImage.from_asset("container_images/backend"),
+            image=ecs.ContainerImage.from_asset(
+                "container_images/backend", platform=Platform.LINUX_AMD64
+            ),
             logging=ecs.LogDrivers.aws_logs(stream_prefix="Backend"),
             environment={
                 "DB_HOST": database.instance_endpoint.hostname,
