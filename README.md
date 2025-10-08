@@ -1,58 +1,69 @@
+# Infra Ecommerce CDK Stack
 
-# Welcome to your CDK Python project!
+This project provisions an end-to-end environment for a simple ecommerce
+application using AWS CDK (Python). It creates the following resources:
 
-This is a blank project for CDK development with Python.
+- A VPC with public subnets for the application load balancer and private
+  isolated subnets for the database.
+- An Amazon ECS cluster with two Fargate services (frontend and backend).
+- An Application Load Balancer that routes `/api` paths to the backend service
+  and all other requests to the frontend service.
+- An Amazon RDS MySQL database with credentials stored in AWS Secrets Manager.
 
-The `cdk.json` file tells the CDK Toolkit how to execute your app.
+## Container images
 
-This project is set up like a standard Python project.  The initialization
-process also creates a virtualenv within this project, stored under the `.venv`
-directory.  To create the virtualenv it assumes that there is a `python3`
-(or `python` for Windows) executable in your path with access to the `venv`
-package. If for any reason the automatic creation of the virtualenv fails,
-you can create the virtualenv manually.
+The stack now builds placeholder container images automatically during
+deployment so that the ECS tasks can start without requiring you to push images
+manually. The Docker contexts live under `container_images/`:
 
-To manually create a virtualenv on MacOS and Linux:
+- `container_images/frontend` serves a static HTML page on port `3000` using the
+  Python `http.server` module.
+- `container_images/backend` provides a lightweight JSON API on port `4000` and
+  echoes the database connection information from its environment variables.
 
-```
-$ python3 -m venv .venv
-```
+To swap in your own application code, replace the contents of these directories
+with your Dockerfile and supporting files, then deploy again. The `Frontend` and
+`Backend` outputs in the CloudFormation stack list the relative paths so that
+other team members can easily locate the build contexts.
 
-After the init process completes and the virtualenv is created, you can use the following
-step to activate your virtualenv.
+> **Note:** The CDK stack builds both images for the `linux/amd64` platform so
+> that they run on the default AWS Fargate architecture. If you need to target
+> a different runtime (for example Graviton/ARM), adjust the `Platform`
+> parameter in `infra_ecommerce_stack.py` accordingly.
 
-```
-$ source .venv/bin/activate
-```
+## Getting started
 
-If you are a Windows platform, you would activate the virtualenv like this:
+1. Create and activate a virtual environment (optional but recommended):
 
-```
-% .venv\Scripts\activate.bat
-```
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   ```
 
-Once the virtualenv is activated, you can install the required dependencies.
+2. Install the dependencies:
 
-```
-$ pip install -r requirements.txt
-```
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-At this point you can now synthesize the CloudFormation template for this code.
+3. (Optional) Run the unit tests:
 
-```
-$ cdk synth
-```
+   ```bash
+   pytest
+   ```
 
-To add additional dependencies, for example other CDK libraries, just add
-them to your `setup.py` file and rerun the `pip install -r requirements.txt`
-command.
+4. Synthesize the CloudFormation template:
 
-## Useful commands
+   ```bash
+   cdk synth
+   ```
 
- * `cdk ls`          list all stacks in the app
- * `cdk synth`       emits the synthesized CloudFormation template
- * `cdk deploy`      deploy this stack to your default AWS account/region
- * `cdk diff`        compare deployed stack with current state
- * `cdk docs`        open CDK documentation
+5. Deploy the stack to your AWS account:
 
-Enjoy!
+   ```bash
+   cdk deploy
+   ```
+
+After a successful deployment the CDK output will show the public load balancer
+URL. Browse to the URL to view the placeholder frontend. Paths that start with
+`/api` are served by the backend container and return JSON data.
