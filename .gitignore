@@ -1,10 +1,81 @@
+# ==========================
+# General
+# ==========================
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+*.log
+*.tmp
 *.swp
-package-lock.json
-__pycache__
-.pytest_cache
-.venv
-*.egg-info
+.DS_Store
+Thumbs.db
 
-# CDK asset staging directory
-.cdk.staging
-cdk.out
+# ==========================
+# Python virtual environments
+# ==========================
+.venv/
+venv/
+env/
+ENV/
+*.env
+
+# ==========================
+# PyCharm / JetBrains IDE
+# ==========================
+*.idea/
+*.iml
+
+# ==========================
+# AWS CDK specific
+# ==========================
+cdk.out/
+.cdk.staging/
+
+# ==========================
+# Credentials / secrets
+# ==========================
+*.pem
+*.key
+*.crt
+*.p12
+*.der
+*.csr
+
+# ==========================
+# Environment / local configs
+# ==========================
+.env
+.env.*
+*.local
+*.config
+
+# ==========================
+# OS / system files
+# ==========================
+ehthumbs.db
+Icon?
+desktop.ini
+
+# ==========================
+# Build / dist artifacts
+# ==========================
+build/
+dist/
+*.spec
+
+# ==========================
+# Pip / cache
+# ==========================
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+__pycache__/
+.cache/
+.mypy_cache/
+.pytest_cache/
+
+# ==========================
+# Jupyter notebooks (optional)
+# ==========================
+.ipynb_checkpoints/
