@@ -140,7 +140,7 @@ class InfraEcommerceStack(Stack):
             self,
             "EcommerceDatabase",
             engine=rds.DatabaseInstanceEngine.mysql(
-                version=rds.MysqlEngineVersion.VER_8_0_35
+                version=rds.MysqlEngineVersion.VER_8_0_43
             ),
             vpc=vpc,
             vpc_subnets=ec2.SubnetSelection(
