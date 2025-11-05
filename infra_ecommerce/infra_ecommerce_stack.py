@@ -233,7 +233,7 @@ class InfraEcommerceStack(Stack):
             "FrontendService",
             cluster=cluster,
             task_definition=frontend_task,
-            desired_count=1,
+            desired_count=0,
             assign_public_ip=True,
             security_groups=[fe_sg],
             vpc_subnets=ec2.SubnetSelection(
@@ -249,7 +249,7 @@ class InfraEcommerceStack(Stack):
             "BackendService",
             cluster=cluster,
             task_definition=backend_task,
-            desired_count=1,
+            desired_count=0,
             assign_public_ip=True,
             security_groups=[be_sg],
             vpc_subnets=ec2.SubnetSelection(
