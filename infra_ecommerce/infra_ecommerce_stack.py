@@ -175,15 +175,24 @@ class InfraEcommerceStack(Stack):
         fe_listener.add_targets(
             "FeTargets",
             port=3000,
+            protocol=elbv2.ApplicationProtocol.HTTP,  # <-- agrega esto
             targets=[fe_service],
-            health_check=elbv2.HealthCheck(path="/", healthy_http_codes="200-399"),
+            health_check=elbv2.HealthCheck(
+                path="/",
+                healthy_http_codes="200-399",
+            ),
         )
 
+        # BE: listener -> targets
         be_listener.add_targets(
             "BeTargets",
             port=4000,
+            protocol=elbv2.ApplicationProtocol.HTTP,  # <-- agrega esto
             targets=[be_service],
-            health_check=elbv2.HealthCheck(path="/health", healthy_http_codes="200-499"),
+            health_check=elbv2.HealthCheck(
+                path="/health",
+                healthy_http_codes="200-499",
+            ),
         )
 
         # --- Outputs ---
