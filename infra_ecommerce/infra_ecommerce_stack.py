@@ -11,19 +11,20 @@ from aws_cdk import (
     aws_rds as rds,
     aws_secretsmanager as secretsmanager,
     aws_codedeploy as codedeploy,
+    aws_iam as iam,
 )
 from constructs import Construct
 
 
 class InfraEcommerceStack(Stack):
     """
-    Un solo entorno (prod) con CodeDeploy ECS blue/green:
-    - VPC públicas + privadas aisladas
-    - RDS MySQL + Secrets Manager
-    - ECR (frontend y backend)
-    - ECS Fargate (servicios con DeploymentController=CODE_DEPLOY)
-    - ALB público :80 (prod) + listener de prueba :9000 (cerrado)
-    - TGs prod/test para FE y BE
+    Infra con despliegues independientes FE/BE (CodeDeploy ECS Blue/Green):
+      - FE: ALB público (:80 prod, :9000 test)
+      - BE: ALB público (:80 prod, :9000 test)  <-- expuesto para Postman/E2E
+      - RDS MySQL privado + Secrets Manager
+      - VPC Endpoints para Fargate privado sin NAT (ECR/S3/Logs)
+      - ECR repos (frontend y backend)
+      - ECS Fargate por servicio con DeploymentController=CODE_DEPLOY
     """
 
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
@@ -51,10 +52,42 @@ class InfraEcommerceStack(Stack):
             ],
         )
 
+        # --- VPC Endpoints para Fargate en subred privada (sin NAT) ---
+        ec2.InterfaceVpcEndpoint(
+            self,
+            "EcrApiEndpoint",
+            vpc=vpc,
+            service=ec2.InterfaceVpcEndpointAwsService.ECR,
+            private_dns_enabled=True,
+            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_ISOLATED),
+        )
+        ec2.InterfaceVpcEndpoint(
+            self,
+            "EcrDkrEndpoint",
+            vpc=vpc,
+            service=ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
+            private_dns_enabled=True,
+            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_ISOLATED),
+        )
+        ec2.InterfaceVpcEndpoint(
+            self,
+            "LogsEndpoint",
+            vpc=vpc,
+            service=ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
+            private_dns_enabled=True,
+            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_ISOLATED),
+        )
+        vpc.add_gateway_endpoint(
+            "S3GatewayEndpoint",
+            service=ec2.GatewayVpcEndpointAwsService.S3,
+            subnets=[ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_ISOLATED)],
+        )
+        # --- fin VPC Endpoints ---
+
         cluster = ecs.Cluster(self, "EcommerceCluster", vpc=vpc)
 
         # ---------------------------
-        # ECR repos (uno por servicio)
+        # ECR repos
         # ---------------------------
         frontend_repo = ecr.Repository(
             self, "FrontendRepo", repository_name="ecommerce-frontend"
@@ -81,74 +114,88 @@ class InfraEcommerceStack(Stack):
         # ---------------------------
         # Security Groups
         # ---------------------------
-        lb_sg = ec2.SecurityGroup(
+        # FE ALB SG (público)
+        fe_alb_sg = ec2.SecurityGroup(
             self,
-            "LoadBalancerSecurityGroup",
+            "FeAlbSg",
             vpc=vpc,
-            description="Allow HTTP access to the load balancer",
+            description="Public ALB for Frontend",
             allow_all_outbound=True,
         )
-        # Solo puerto 80 público; 9000 será listener de prueba NO expuesto
-        lb_sg.add_ingress_rule(
-            ec2.Peer.any_ipv4(), ec2.Port.tcp(80), "Allow HTTP 80"
-        )
+        fe_alb_sg.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(80), "HTTP 80 public")
 
-        fe_sg = ec2.SecurityGroup(
+        # FE service SG
+        fe_svc_sg = ec2.SecurityGroup(
             self,
-            "FrontendServiceSecurityGroup",
+            "FeServiceSg",
             vpc=vpc,
-            description="Allow ALB to reach the frontend",
+            description="Frontend service SG",
             allow_all_outbound=True,
         )
-        fe_sg.add_ingress_rule(
-            lb_sg, ec2.Port.tcp(3000), "ALB to Frontend containers"
-        )
+        fe_svc_sg.add_ingress_rule(fe_alb_sg, ec2.Port.tcp(3000), "ALB to FE 3000")
 
-        be_sg = ec2.SecurityGroup(
+        # BE ALB SG (público para E2E/Postman)
+        be_alb_sg = ec2.SecurityGroup(
             self,
-            "BackendServiceSecurityGroup",
+            "BeAlbSg",
             vpc=vpc,
-            description="Allow ALB to reach the backend",
+            description="Public ALB for Backend (E2E and Postman)",
             allow_all_outbound=True,
         )
-        be_sg.add_ingress_rule(
-            lb_sg, ec2.Port.tcp(4000), "ALB to Backend containers"
-        )
+        be_alb_sg.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(80), "HTTP 80 public")
+        # Nota: no abrimos 9000; el listener test queda cerrado (open=False)
 
+        # BE service SG
+        be_svc_sg = ec2.SecurityGroup(
+            self,
+            "BeServiceSg",
+            vpc=vpc,
+            description="Backend service SG",
+            allow_all_outbound=True,
+        )
+        be_svc_sg.add_ingress_rule(be_alb_sg, ec2.Port.tcp(4000), "BE ALB to BE 4000")
+
+        # DB SG
         db_sg = ec2.SecurityGroup(
             self,
-            "DatabaseSecurityGroup",
+            "DbSg",
             vpc=vpc,
-            description="Restrict DB to backend only",
+            description="DB for backend only",
             allow_all_outbound=True,
         )
-        db_sg.add_ingress_rule(
-            be_sg, ec2.Port.tcp(3306), "Backend to MySQL 3306"
-        )
+        db_sg.add_ingress_rule(be_svc_sg, ec2.Port.tcp(3306), "Backend to MySQL 3306")
 
         # ---------------------------
-        # ALB + Listeners (prod/test)
+        # ALBs + Listeners (separados por servicio)
         # ---------------------------
-        alb = elbv2.ApplicationLoadBalancer(
+        # FE ALB (público)
+        fe_alb = elbv2.ApplicationLoadBalancer(
             self,
-            "PublicLoadBalancer",
+            "FeAlb",
             vpc=vpc,
             internet_facing=True,
-            security_group=lb_sg,
+            security_group=fe_alb_sg,
+        )
+        fe_listener_prod = fe_alb.add_listener(
+            "FeListenerProd", port=80, open=True, protocol=elbv2.ApplicationProtocol.HTTP
+        )
+        fe_listener_test = fe_alb.add_listener(
+            "FeListenerTest", port=9000, open=False, protocol=elbv2.ApplicationProtocol.HTTP
         )
 
-        prod_listener = alb.add_listener(
-            "HttpProdListener",
-            port=80,
-            open=True,
-            protocol=elbv2.ApplicationProtocol.HTTP,
+        # BE ALB (público)
+        be_alb = elbv2.ApplicationLoadBalancer(
+            self,
+            "BeAlb",
+            vpc=vpc,
+            internet_facing=True,
+            security_group=be_alb_sg,
         )
-        # Listener de test CERRADO (no expuesto públicamente)
-        test_listener = alb.add_listener(
-            "HttpTestListener",
-            port=9000,
-            protocol=elbv2.ApplicationProtocol.HTTP,
-            open=False,
+        be_listener_prod = be_alb.add_listener(
+            "BeListenerProd", port=80, open=True, protocol=elbv2.ApplicationProtocol.HTTP
+        )
+        be_listener_test = be_alb.add_listener(
+            "BeListenerTest", port=9000, open=False, protocol=elbv2.ApplicationProtocol.HTTP
         )
 
         # ---------------------------
@@ -161,16 +208,10 @@ class InfraEcommerceStack(Stack):
                 version=rds.MysqlEngineVersion.VER_8_0_43
             ),
             vpc=vpc,
-            vpc_subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_ISOLATED
-            ),
-            credentials=rds.Credentials.from_secret(
-                database_secret, username="appuser"
-            ),
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_ISOLATED),
+            credentials=rds.Credentials.from_secret(database_secret, username="appuser"),
             database_name="ecommerce",
-            instance_type=ec2.InstanceType.of(
-                ec2.InstanceClass.BURSTABLE3, ec2.InstanceSize.MICRO
-            ),
+            instance_type=ec2.InstanceType.of(ec2.InstanceClass.BURSTABLE3, ec2.InstanceSize.MICRO),
             allocated_storage=20,
             max_allocated_storage=100,
             multi_az=False,
@@ -182,28 +223,31 @@ class InfraEcommerceStack(Stack):
         )
 
         # ---------------------------
-        # Task definitions (Fargate)
+        # Task definitions
         # ---------------------------
-        frontend_task = ecs.FargateTaskDefinition(
-            self, "FrontendTask", cpu=512, memory_limit_mib=1024
+        # FRONTEND
+        fe_task = ecs.FargateTaskDefinition(self, "FeTask", cpu=512, memory_limit_mib=1024)
+        # Asegurar execution role (permisos ECR/Logs, etc.)
+        fe_task.execution_role.add_managed_policy(
+            iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AmazonECSTaskExecutionRolePolicy")
         )
-        frontend_container = frontend_task.add_container(
+        fe_container = fe_task.add_container(
             "FrontendContainer",
             image=ecs.ContainerImage.from_ecr_repository(frontend_repo, tag="latest"),
             logging=ecs.LogDrivers.aws_logs(stream_prefix="Frontend"),
             environment={
-                # Si en Next usas fetch relativo '/api', puedes omitir esta env
-                "API_BASE_URL": f"http://{alb.load_balancer_dns_name}/api"
+                # FE llama al BE por su ALB público
+                "API_BASE_URL": f"http://{be_alb.load_balancer_dns_name}"
             },
         )
-        frontend_container.add_port_mappings(
-            ecs.PortMapping(container_port=3000)
-        )
+        fe_container.add_port_mappings(ecs.PortMapping(container_port=3000))
 
-        backend_task = ecs.FargateTaskDefinition(
-            self, "BackendTask", cpu=512, memory_limit_mib=1024
+        # BACKEND
+        be_task = ecs.FargateTaskDefinition(self, "BeTask", cpu=512, memory_limit_mib=1024)
+        be_task.execution_role.add_managed_policy(
+            iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AmazonECSTaskExecutionRolePolicy")
         )
-        backend_container = backend_task.add_container(
+        be_container = be_task.add_container(
             "BackendContainer",
             image=ecs.ContainerImage.from_ecr_repository(backend_repo, tag="latest"),
             logging=ecs.LogDrivers.aws_logs(stream_prefix="Backend"),
@@ -213,145 +257,101 @@ class InfraEcommerceStack(Stack):
                 "DB_NAME": "ecommerce",
             },
             secrets={
-                "DB_USERNAME": ecs.Secret.from_secrets_manager(
-                    database_secret, field="username"
-                ),
-                "DB_PASSWORD": ecs.Secret.from_secrets_manager(
-                    database_secret, field="password"
-                ),
+                "DB_USERNAME": ecs.Secret.from_secrets_manager(database_secret, field="username"),
+                "DB_PASSWORD": ecs.Secret.from_secrets_manager(database_secret, field="password"),
             },
         )
-        backend_container.add_port_mappings(
-            ecs.PortMapping(container_port=4000)
-        )
+        be_container.add_port_mappings(ecs.PortMapping(container_port=4000))
 
         # ---------------------------
-        # ECS Services (CodeDeploy controller)
+        # Services (con CodeDeploy)
         # ---------------------------
-        frontend_service = ecs.FargateService(
+        fe_service = ecs.FargateService(
             self,
             "FrontendService",
             cluster=cluster,
-            task_definition=frontend_task,
+            task_definition=fe_task,
             desired_count=1,
             assign_public_ip=True,
-            security_groups=[fe_sg],
-            vpc_subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PUBLIC
-            ),
+            security_groups=[fe_svc_sg],
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
             deployment_controller=ecs.DeploymentController(
                 type=ecs.DeploymentControllerType.CODE_DEPLOY
             ),
         )
 
-        backend_service = ecs.FargateService(
+        be_service = ecs.FargateService(
             self,
             "BackendService",
             cluster=cluster,
-            task_definition=backend_task,
+            task_definition=be_task,
             desired_count=1,
-            assign_public_ip=True,
-            security_groups=[be_sg],
-            vpc_subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PUBLIC
-            ),
+            assign_public_ip=False,
+            security_groups=[be_svc_sg],
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_ISOLATED),
             deployment_controller=ecs.DeploymentController(
                 type=ecs.DeploymentControllerType.CODE_DEPLOY
             ),
         )
 
         # ---------------------------
-        # Target Groups (prod/test)
+        # Target Groups (IDs únicos para evitar reuso)
         # ---------------------------
-        # FRONTEND
+        # FE TGs (puerto target=3000)
         fe_tg_prod = elbv2.ApplicationTargetGroup(
             self,
-            "FeTgProd",
+            "FeTgProdV3",
             vpc=vpc,
             port=3000,
             protocol=elbv2.ApplicationProtocol.HTTP,
             target_type=elbv2.TargetType.IP,
-            health_check=elbv2.HealthCheck(
-                path="/",
-                healthy_http_codes="200-399",
-                interval=Duration.seconds(30),
-            ),
+            health_check=elbv2.HealthCheck(path="/", healthy_http_codes="200-399", interval=Duration.seconds(30)),
         )
         fe_tg_test = elbv2.ApplicationTargetGroup(
             self,
-            "FeTgTest",
+            "FeTgTestV3",
             vpc=vpc,
             port=3000,
             protocol=elbv2.ApplicationProtocol.HTTP,
             target_type=elbv2.TargetType.IP,
-            health_check=elbv2.HealthCheck(
-                path="/",
-                healthy_http_codes="200-399",
-                interval=Duration.seconds(30),
-            ),
+            health_check=elbv2.HealthCheck(path="/", healthy_http_codes="200-399", interval=Duration.seconds(30)),
         )
-        frontend_service.attach_to_application_target_group(fe_tg_prod)
+        fe_service.attach_to_application_target_group(fe_tg_prod)
 
-        # BACKEND
-        # Aceptamos 2xx–4xx por si la raíz devuelve 401/403;
-        # ideal: crear /health que devuelva 200 y cambiar a 200-399.
+        # BE TGs (puerto target=4000). Health en /health (200)
         be_tg_prod = elbv2.ApplicationTargetGroup(
             self,
-            "BeTgProd",
+            "BeTgProdV3",
             vpc=vpc,
             port=4000,
             protocol=elbv2.ApplicationProtocol.HTTP,
             target_type=elbv2.TargetType.IP,
-            health_check=elbv2.HealthCheck(
-                path="/",
-                healthy_http_codes="200-499",
-                interval=Duration.seconds(30),
-            ),
+            health_check=elbv2.HealthCheck(path="/health", healthy_http_codes="200-399", interval=Duration.seconds(30)),
         )
         be_tg_test = elbv2.ApplicationTargetGroup(
             self,
-            "BeTgTest",
+            "BeTgTestV3",
             vpc=vpc,
             port=4000,
             protocol=elbv2.ApplicationProtocol.HTTP,
             target_type=elbv2.TargetType.IP,
-            health_check=elbv2.HealthCheck(
-                path="/",
-                healthy_http_codes="200-499",
-                interval=Duration.seconds(30),
-            ),
+            health_check=elbv2.HealthCheck(path="/health", healthy_http_codes="200-399", interval=Duration.seconds(30)),
         )
-        backend_service.attach_to_application_target_group(be_tg_prod)
+        be_service.attach_to_application_target_group(be_tg_prod)
 
         # ---------------------------
-        # Reglas de enrutamiento
+        # Listener rules
         # ---------------------------
-        # PROD listener: raíz -> FE, /api -> BE
-        prod_listener.add_target_groups(
-            "FrontendProdRule",
-            target_groups=[fe_tg_prod],
-        )
-        prod_listener.add_target_groups(
-            "BackendProdRule",
-            priority=10,
-            conditions=[elbv2.ListenerCondition.path_patterns(["/api*", "/api/*"])],
-            target_groups=[be_tg_prod],
-        )
+        # FE listeners -> FE TGs
+        fe_listener_prod.add_target_groups("FeProdRule", target_groups=[fe_tg_prod])
+        fe_listener_test.add_target_groups("FeTestRule", target_groups=[fe_tg_test])
 
-        # TEST listener: mismas rutas pero TGs de test (no público)
-        test_listener.add_target_groups(
-            "FrontendTestRule",
-            target_groups=[fe_tg_test],
-        )
-        test_listener.add_target_groups(
-            "BackendTestRule",
-            priority=10,
-            conditions=[elbv2.ListenerCondition.path_patterns(["/api*", "/api/*"])],
-            target_groups=[be_tg_test],
-        )
+        # BE listeners -> BE TGs
+        be_listener_prod.add_target_groups("BeProdRule", target_groups=[be_tg_prod])
+        be_listener_test.add_target_groups("BeTestRule", target_groups=[be_tg_test])
 
         # ---------------------------
-        # CodeDeploy ECS Blue/Green
+        # CodeDeploy ECS Blue/Green (independientes)
         # ---------------------------
         fe_app = codedeploy.EcsApplication(self, "FrontendEcsApp")
         be_app = codedeploy.EcsApplication(self, "BackendEcsApp")
@@ -360,92 +360,46 @@ class InfraEcommerceStack(Stack):
             self,
             "FrontendDeploymentGroup",
             application=fe_app,
-            service=frontend_service,
+            service=fe_service,
             blue_green_deployment_config=codedeploy.EcsBlueGreenDeploymentConfig(
-                blue_target_group=fe_tg_prod,   # TG actual (blue)
-                green_target_group=fe_tg_test,  # TG nuevo (green)
-                listener=prod_listener,         # listener prod :80
-                test_listener=test_listener,    # listener test :9000 (cerrado)
+                blue_target_group=fe_tg_prod,
+                green_target_group=fe_tg_test,
+                listener=fe_listener_prod,
+                test_listener=fe_listener_test,
                 termination_wait_time=Duration.minutes(5),
             ),
             deployment_config=codedeploy.EcsDeploymentConfig.ALL_AT_ONCE,
-            auto_rollback=codedeploy.AutoRollbackConfig(
-                failed_deployment=True, stopped_deployment=True
-            ),
+            auto_rollback=codedeploy.AutoRollbackConfig(failed_deployment=True, stopped_deployment=True),
         )
 
         be_dg = codedeploy.EcsDeploymentGroup(
             self,
             "BackendDeploymentGroup",
             application=be_app,
-            service=backend_service,
+            service=be_service,
             blue_green_deployment_config=codedeploy.EcsBlueGreenDeploymentConfig(
                 blue_target_group=be_tg_prod,
                 green_target_group=be_tg_test,
-                listener=prod_listener,
-                test_listener=test_listener,
+                listener=be_listener_prod,
+                test_listener=be_listener_test,
                 termination_wait_time=Duration.minutes(5),
             ),
             deployment_config=codedeploy.EcsDeploymentConfig.ALL_AT_ONCE,
-            auto_rollback=codedeploy.AutoRollbackConfig(
-                failed_deployment=True, stopped_deployment=True
-            ),
+            auto_rollback=codedeploy.AutoRollbackConfig(failed_deployment=True, stopped_deployment=True),
         )
 
         # ---------------------------
         # Outputs
         # ---------------------------
-        CfnOutput(
-            self,
-            "LoadBalancerUrl",
-            value=f"http://{alb.load_balancer_dns_name}",
-            description="Public endpoint for the ecommerce frontend",
-        )
-        CfnOutput(
-            self,
-            "FrontendEcrUri",
-            value=frontend_repo.repository_uri,
-            description="ECR URI (frontend)",
-        )
-        CfnOutput(
-            self,
-            "BackendEcrUri",
-            value=backend_repo.repository_uri,
-            description="ECR URI (backend)",
-        )
-        CfnOutput(
-            self,
-            "DatabaseSecretArn",
-            value=database_secret.secret_arn,
-            description="Secrets Manager ARN storing the database credentials",
-        )
-        CfnOutput(
-            self,
-            "DatabaseEndpoint",
-            value=database.instance_endpoint.socket_address,
-            description="Endpoint and port for the MySQL database",
-        )
-        CfnOutput(
-            self,
-            "FrontendCodeDeployApp",
-            value=fe_app.application_name,
-            description="CodeDeploy ECS application (frontend)",
-        )
-        CfnOutput(
-            self,
-            "BackendCodeDeployApp",
-            value=be_app.application_name,
-            description="CodeDeploy ECS application (backend)",
-        )
-        CfnOutput(
-            self,
-            "FrontendDeploymentGroupName",
-            value=fe_dg.deployment_group_name,
-            description="CodeDeploy deployment group (frontend)",
-        )
-        CfnOutput(
-            self,
-            "BackendDeploymentGroupName",
-            value=be_dg.deployment_group_name,
-            description="CodeDeploy deployment group (backend)",
-        )
+        CfnOutput(self, "FrontendUrl", value=f"http://{fe_alb.load_balancer_dns_name}", description="FE public URL")
+        CfnOutput(self, "BackendUrl", value=f"http://{be_alb.load_balancer_dns_name}", description="BE public URL (Postman/E2E)")
+        CfnOutput(self, "FrontendEcrUri", value=frontend_repo.repository_uri)
+        CfnOutput(self, "BackendEcrUri", value=backend_repo.repository_uri)
+        CfnOutput(self, "DatabaseSecretArn", value=database_secret.secret_arn)
+        CfnOutput(self, "DatabaseEndpoint", value=database.instance_endpoint.socket_address)
+
+        # Nombres físicos (para pipelines)
+        CfnOutput(self, "FrontendCodeDeployApp", value=fe_app.application_name)
+        CfnOutput(self, "FrontendDeploymentGroupName", value=fe_dg.deployment_group_name)
+        CfnOutput(self, "BackendCodeDeployApp", value=be_app.application_name)
+        CfnOutput(self, "BackendDeploymentGroupName", value=be_dg.deployment_group_name)
