@@ -25,6 +25,7 @@ class InfraEcommerceStack(Stack):
       - VPC Endpoints para Fargate privado sin NAT (ECR/S3/Logs)
       - ECR repos (frontend y backend)
       - ECS Fargate por servicio con DeploymentController=CODE_DEPLOY
+      - Roles de ejecución de tareas (executionRole) creados explícitamente
     """
 
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
@@ -223,13 +224,38 @@ class InfraEcommerceStack(Stack):
         )
 
         # ---------------------------
+        # IAM: Execution roles explícitos para FE y BE
+        # ---------------------------
+        fe_exec_role = iam.Role(
+            self,
+            "FeTaskExecutionRole",
+            assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
+            description="Execution role for FE tasks (pull from ECR, write logs)",
+        )
+        fe_exec_role.add_managed_policy(
+            iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AmazonECSTaskExecutionRolePolicy")
+        )
+
+        be_exec_role = iam.Role(
+            self,
+            "BeTaskExecutionRole",
+            assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
+            description="Execution role for BE tasks (pull from ECR, write logs)",
+        )
+        be_exec_role.add_managed_policy(
+            iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AmazonECSTaskExecutionRolePolicy")
+        )
+
+        # ---------------------------
         # Task definitions
         # ---------------------------
         # FRONTEND
-        fe_task = ecs.FargateTaskDefinition(self, "FeTask", cpu=512, memory_limit_mib=1024)
-        # Asegurar execution role (permisos ECR/Logs, etc.)
-        fe_task.execution_role.add_managed_policy(
-            iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AmazonECSTaskExecutionRolePolicy")
+        fe_task = ecs.FargateTaskDefinition(
+            self,
+            "FeTask",
+            cpu=512,
+            memory_limit_mib=1024,
+            execution_role=fe_exec_role,  # <- rol explícito
         )
         fe_container = fe_task.add_container(
             "FrontendContainer",
@@ -243,9 +269,12 @@ class InfraEcommerceStack(Stack):
         fe_container.add_port_mappings(ecs.PortMapping(container_port=3000))
 
         # BACKEND
-        be_task = ecs.FargateTaskDefinition(self, "BeTask", cpu=512, memory_limit_mib=1024)
-        be_task.execution_role.add_managed_policy(
-            iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AmazonECSTaskExecutionRolePolicy")
+        be_task = ecs.FargateTaskDefinition(
+            self,
+            "BeTask",
+            cpu=512,
+            memory_limit_mib=1024,
+            execution_role=be_exec_role,  # <- rol explícito
         )
         be_container = be_task.add_container(
             "BackendContainer",
