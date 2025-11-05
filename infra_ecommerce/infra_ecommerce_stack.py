@@ -202,3 +202,23 @@ class InfraEcommerceStack(Stack):
         CfnOutput(self, "BackendEcrUri", value=be_repo.repository_uri)
         CfnOutput(self, "DatabaseSecretArn", value=db_secret.secret_arn)
         CfnOutput(self, "DatabaseEndpoint", value=db.instance_endpoint.socket_address)
+        # --- Outputs adicionales: Security Groups (para usarlos en CI) ---
+        CfnOutput(
+            self,
+            "FrontendSecurityGroupId",
+            value=fe_svc_sg.security_group_id,
+            description="Security Group ID for the Frontend ECS Service",
+        )
+        CfnOutput(
+            self,
+            "BackendSecurityGroupId",
+            value=be_svc_sg.security_group_id,
+            description="Security Group ID for the Backend ECS Service",
+        )
+        CfnOutput(
+            self,
+            "DatabaseSecurityGroupId",
+            value=db_sg.security_group_id,
+            description="Security Group ID for the MySQL Database",
+        )
+
